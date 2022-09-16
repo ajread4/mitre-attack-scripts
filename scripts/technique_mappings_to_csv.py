@@ -1,27 +1,24 @@
 import argparse
 import csv
 import io
+import requests #needs to be added to requirements
+from stix2 import MemoryStore #needs to be added to requirements
 
 from stix2 import TAXIICollectionSource, MemorySource, Filter
 from taxii2client.v20 import Collection
 
 import tqdm
 
+def build_taxii_source(version):
+    """Download latest enterprise or mobile att&ck content from github"""
 
-def build_taxii_source(collection_name):
-    """Downloads latest Enterprise or Mobile ATT&CK content from MITRE TAXII Server."""
-    # Establish TAXII2 Collection instance for Enterprise ATT&CK collection
-    collection_map = {
-        "enterprise_attack": "95ecc380-afe9-11e4-9b6c-751b66dd541e",
-        "mobile_attack": "2f669986-b40b-4423-b720-4396ca6a462b"
-    }
-    collection_url = "https://cti-taxii.mitre.org/stix/collections/" + collection_map[collection_name] + "/"
-    collection = Collection(collection_url)
-    taxii_ds = TAXIICollectionSource(collection)
+    if version:
+        collection_url = f"https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack-{version}.json"
+    else:
+        collection_url = f"https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack-11.3.json"
 
-    # Create an in-memory source (to prevent multiple web requests)
-    return MemorySource(stix_data=taxii_ds.query())
-
+    stix_json = requests.get(collection_url).json()
+    return MemoryStore(stix_data=stix_json["objects"])
 
 def get_all_techniques(src, source_name, tactic=None):
     """Filters data source by attack-pattern which extracts all ATT&CK Techniques"""
@@ -49,7 +46,6 @@ def filter_for_term_relationships(src, relationship_type, object_id, target=True
 
     results = src.query(filters)
     return remove_deprecated(results)
-
 
 def filter_by_type_and_id(src, object_type, object_id, source_name):
     """Filters data source by id and type"""
@@ -92,13 +88,13 @@ def arg_parse():
     """Function to handle script arguments."""
     parser = argparse.ArgumentParser(description="Fetches the current ATT&CK content expressed as STIX2 and creates spreadsheet mapping Techniques with Mitigations, Groups or Software.")
     parser.add_argument("-d", "--domain", type=str, required=True, choices=["enterprise_attack", "mobile_attack"], help="Which ATT&CK domain to use (Enterprise, Mobile).")
-    parser.add_argument("-m", "--mapping-type", type=str, required=True, choices=["groups", "mitigations", "software"], help="Which type of object to output mappings for using ATT&CK content.")
+    parser.add_argument("-m", "--mapping-type", type=str, required=True, choices=["groups", "mitigations", "software","full_mitigations"], help="Which type of object to output mappings for using ATT&CK content.")
     parser.add_argument("-t", "--tactic",  type=str, required=False,  help=" Filter based on this tactic name (e.g. initial-access) " )
     parser.add_argument("-s", "--save", type=str, required=False, help="Save the CSV file with a different filename.")
     return parser
 
 
-def do_mapping(ds, fieldnames, relationship_type, type_filter, source_name, sorting_keys, tactic=None):
+def do_mapping(ds, fieldnames, relationship_type, type_filter, source_name, sorting_keys, full_mitigation, tactic=None):
     """Main logic to map techniques to mitigations, groups or software"""
     all_attack_patterns = get_all_techniques(ds, source_name, tactic)
     writable_results = []
@@ -106,30 +102,47 @@ def do_mapping(ds, fieldnames, relationship_type, type_filter, source_name, sort
     for attack_pattern in tqdm.tqdm(all_attack_patterns, desc="parsing data for techniques"):
         # Grabs relationships for identified techniques
         relationships = filter_for_term_relationships(ds, relationship_type, attack_pattern.id)
-
+        found_relationship=False
         for relationship in relationships:
             # Groups are defined in STIX as intrusion-set objects
             # Mitigations are defined in STIX as course-of-action objects
             # Software are defined in STIX as malware objects
+
             stix_results = filter_by_type_and_id(ds, type_filter, relationship.source_ref, source_name)
 
             if stix_results:
                 row_data = (
                     grab_external_id(attack_pattern, source_name),
                     attack_pattern.name,
+                    attack_pattern.description, ## add the description of the technique to the fields
                     grab_external_id(stix_results[0], source_name),
                     stix_results[0].name,
                     escape_chars(stix_results[0].description),
                     escape_chars(relationship.description),
                 )
 
+                found_relationship=True
                 writable_results.append(dict(zip(fieldnames, row_data)))
+
+            if not (found_relationship) and full_mitigation:
+                row_data=(
+                    grab_external_id(attack_pattern, source_name),
+                    attack_pattern.name,
+                    attack_pattern.description,  ## add the description of the technique to the fields
+                    "No Mitigation",
+                    "None",
+                    "None",
+                    "None",
+                )
+                found_relationship = True
+                writable_results.append(dict(zip(fieldnames, row_data)))
+
 
     return sorted(writable_results, key=lambda x: (x[sorting_keys[0]], x[sorting_keys[1]]))
 
 
 def main(args):
-    data_source = build_taxii_source(args.domain)
+    data_source = build_taxii_source(11.3)
     op = args.mapping_type
 
     source_map = {
@@ -144,21 +157,32 @@ def main(args):
         relationship_type = "uses"
         type_filter = "intrusion-set"
         sorting_keys = ("TID", "GID")
-        rowdicts = do_mapping(data_source, fieldnames, relationship_type, type_filter, source_name, sorting_keys, tactic)
+        full_mitigation = False
+        rowdicts = do_mapping(data_source, fieldnames, relationship_type, type_filter, source_name, sorting_keys, full_mitigation, tactic)
     elif op == "mitigations":
         filename = args.save or "mitigations.csv"
-        fieldnames = ("TID", "Technique Name", "MID", "Mitigation Name", "Mitigation Description", "Application")
+        fieldnames = ("TID", "Technique Name","Technique Description", "MID", "Mitigation Name", "Mitigation Description", "Application") # added technique description
         relationship_type = "mitigates"
         type_filter = "course-of-action"
         sorting_keys = ("TID", "MID")
-        rowdicts = do_mapping(data_source, fieldnames, relationship_type, type_filter, source_name, sorting_keys, tactic)
+        full_mitigation = False
+        rowdicts = do_mapping(data_source, fieldnames, relationship_type, type_filter, source_name, sorting_keys, full_mitigation,tactic)
     elif op == "software":
         filename = args.save or "software.csv"
         fieldnames = ("TID", "Technique Name", "SID", "Software Name", "Software Description", "Use")
         relationship_type = "uses"
         type_filter = "malware"
         sorting_keys = ("TID", "SID")
-        rowdicts = do_mapping(data_source, fieldnames, relationship_type, type_filter, source_name, sorting_keys, tactic)
+        full_mitigation = False
+        rowdicts = do_mapping(data_source, fieldnames, relationship_type, type_filter, source_name, sorting_keys,full_mitigation, tactic)
+    elif op == "full_mitigations":
+        filename = args.save or "db_full.csv"
+        fieldnames = ("TID", "Technique Name","Technique Description", "MID", "Mitigation Name", "Mitigation Description", "Application") # added technique description
+        relationship_type = "mitigates"
+        type_filter = "course-of-action"
+        sorting_keys = ("TID", "MID")
+        full_mitigation = True
+        rowdicts = do_mapping(data_source, fieldnames, relationship_type, type_filter, source_name, sorting_keys, full_mitigation,tactic)
     else:
         raise RuntimeError("Unknown option: %s" % op)
 
