@@ -88,6 +88,7 @@ def arg_parse():
     """Function to handle script arguments."""
     parser = argparse.ArgumentParser(description="Fetches the current ATT&CK content expressed as STIX2 and creates spreadsheet mapping Techniques with Mitigations, Groups or Software.")
     parser.add_argument("-d", "--domain", type=str, required=True, choices=["enterprise_attack", "mobile_attack"], help="Which ATT&CK domain to use (Enterprise, Mobile).")
+    parser.add_argument("-v", "--version", type=str, required=True, choices=["9.0"], help="Which ATT&CK version to use")
     parser.add_argument("-m", "--mapping-type", type=str, required=True, choices=["groups", "mitigations", "software","full_mitigations"], help="Which type of object to output mappings for using ATT&CK content.")
     parser.add_argument("-t", "--tactic",  type=str, required=False,  help=" Filter based on this tactic name (e.g. initial-access) " )
     parser.add_argument("-s", "--save", type=str, required=False, help="Save the CSV file with a different filename.")
